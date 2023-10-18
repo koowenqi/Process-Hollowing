@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <Windows.h>
 #include <winternl.h>
+#include <ShlObj_core.h>
 
 #pragma comment(lib,"ntdll.lib")
 
@@ -50,7 +51,7 @@ int main()
 	printf("\nOpening the replacement executable.\n");
 
 	// Creating replacement executable to be ran
-	hFile = CreateFileW(L"C:/Users/wenqi/Desktop/ihatecoding.txt", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_ALWAYS, 0, NULL);
+	hFile = CreateFileW(L"C:/Users/wenqi/Desktop/MessageBox.exe", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 	if (hFile == INVALID_HANDLE_VALUE) {
 		printf("\nError: Unable to create the replacement executable. CreateFile failed with error %d\n", GetLastError());
 		NtTerminateProcess(pi.hProcess, 1);
@@ -291,7 +292,6 @@ int main()
 	ResumeThread(pi->hThread);
 	*/
 	
-	system("PAUSE");
 	return 0;
 
 }
